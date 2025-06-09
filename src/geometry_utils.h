@@ -4,6 +4,7 @@
 #include <string>
 #include <tuple>
 #include <Eigen/Dense>
+#include "structures.h"
 
 // 2D geometry utility functions
 float distance2D(const Eigen::Vector2f &a, const Eigen::Vector2f &b);

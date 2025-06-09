@@ -2,6 +2,11 @@
 #define DBSCAN_H
 
 #include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <vector>
+#include <queue>
 
 #define UN_PROCESSED 0
 #define PROCESSING 1
