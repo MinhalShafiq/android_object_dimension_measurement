@@ -2,12 +2,13 @@
 
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2
-INCLUDES = -I/usr/include/pcl-1.12 -I/usr/include/eigen3 -I/usr/include/vtk-9.1
-LIBS = -lpcl_common -lpcl_io -lpcl_filters -lpcl_segmentation -lpcl_visualization \
-       -lpcl_search -lpcl_features -lpcl_surface -lvtkCommonCore -lvtkRenderingCore \
-       -lvtkRenderingOpenGL2 -lvtkInteractionStyle -lvtkCommonDataModel -lvtkFiltersCore \
-       -lvtkCommonExecutionModel -lboost_system -lboost_filesystem -lboost_thread \
-       -lboost_date_time -lboost_iostreams -lboost_serialization -pthread
+INCLUDES = -I/usr/include/pcl-1.12 -I/usr/include/eigen3 -I/usr/include/vtk-7.1
+LIBS = -lpcl_common -lpcl_io -lpcl_features -lpcl_filters -lpcl_segmentation \
+		-lpcl_visualization -lpthread     -lvtkCommonCore-7.1 -lvtkCommonDataModel-7.1 \
+		-lvtkCommonTransforms-7.1 -lvtkCommonMath-7.1     -lvtkRenderingCore-7.1 \
+		-lvtkRenderingOpenGL2-7.1 -lvtkInteractionStyle-7.1 -lvtkIOImage-7.1     -lvtkCommonExecutionModel-7.1 \
+		-lboost_thread -lboost_chrono -lboost_system     -lvtkRenderingLOD-7.1 -lvtkFiltersSources-7.1 -lvtksys-7.1 \
+		-lpcl_search -lpcl_surface -lpcl_kdtree
 
 SRCDIR = src
 OBJDIR = obj
@@ -33,7 +34,7 @@ clean:
 
 install-deps:
 	sudo apt-get update
-	sudo apt-get install -y libpcl-dev libeigen3-dev libvtk9-dev
+	sudo apt-get install -y libpcl-dev libeigen3-dev libvtk7-dev
 
 .PHONY: install-deps
 )

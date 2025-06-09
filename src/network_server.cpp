@@ -1,7 +1,11 @@
 #include "network_server.h"
 #include "point_cloud_processing.h"
 #include "obb_calculator.h"
+
+#include "DBSCAN_simple.h"
+#include "DBSCAN_precomp.h"
 #include "DBSCAN_kdtree.h"
+
 #include <iostream>
 #include <thread>
 #include <sys/socket.h>
