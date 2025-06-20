@@ -5,6 +5,505 @@
 #include <pcl/common/pca.h>
 #include <iostream>
 #include <limits>
+#include <algorithm>
+#include <cmath>
+#include <chrono>
+#include <iomanip>
+#include <pcl/common/io.h>
+
+ObjectValidationResult validateObjectCluster(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+    ObjectValidationResult result;
+    result.is_valid_object = false;
+    result.confidence_score = 0.0f;
+    
+    if (!cloud || cloud->empty()) {
+        result.rejection_reason = "Empty cloud";
+        return result;
+    }
+    
+    // Get bounding box dimensions
+    Eigen::Vector4f min_pt, max_pt;
+    pcl::getMinMax3D(*cloud, min_pt, max_pt);
+    
+    float width = max_pt[0] - min_pt[0];
+    float depth = max_pt[1] - min_pt[1];
+    float height = max_pt[2] - min_pt[2];
+    
+    // ADAPTIVE SIZE CONSTRAINTS - much more permissive
+    const float MAX_DIMENSION = 2500.0f; // Keep 2.5m as absolute maximum
+    const float MIN_DIMENSION = 20.0f;   // Reduced to 2cm minimum (was 5cm)
+    
+    if (width > MAX_DIMENSION || depth > MAX_DIMENSION || height > MAX_DIMENSION) {
+        result.rejection_reason = "Object too large: " + std::to_string(std::max({width, depth, height})) + "mm";
+        return result;
+    }
+    
+    if (width < MIN_DIMENSION && depth < MIN_DIMENSION && height < MIN_DIMENSION) {
+        result.rejection_reason = "Object too small (all dimensions < " + std::to_string(MIN_DIMENSION) + "mm)";
+        return result;
+    }
+    
+    // ADAPTIVE ASPECT RATIO - more permissive based on object size
+    float max_dim = std::max({width, depth, height});
+    float min_dim = std::min({width, depth, height});
+    float aspect_ratio = max_dim / min_dim;
+    
+    // Allow higher aspect ratios for smaller objects (could be thin objects)
+    // Allow lower aspect ratios for larger objects (likely walls if too elongated)
+    float max_allowed_aspect_ratio;
+    if (max_dim < 200.0f) {        // Objects smaller than 20cm
+        max_allowed_aspect_ratio = 50.0f;  // Very permissive
+    } else if (max_dim < 500.0f) { // Objects 20-50cm
+        max_allowed_aspect_ratio = 25.0f;  // Moderately permissive
+    } else if (max_dim < 1000.0f) { // Objects 50cm-1m
+        max_allowed_aspect_ratio = 15.0f;  // Standard restriction
+    } else {                       // Objects larger than 1m
+        max_allowed_aspect_ratio = 8.0f;   // Strict (likely walls if too elongated)
+    }
+    
+    if (aspect_ratio > max_allowed_aspect_ratio) {
+        result.rejection_reason = "Invalid aspect ratio: " + std::to_string(aspect_ratio) + 
+                                 " (max allowed: " + std::to_string(max_allowed_aspect_ratio) + 
+                                 " for size " + std::to_string(max_dim) + "mm)";
+        return result;
+    }
+    
+    // ADAPTIVE POINT DENSITY - much more realistic thresholds
+    float volume = width * depth * height;
+    float point_density = cloud->size() / volume; // points per cubic mm
+    
+    // Calculate adaptive density thresholds based on object size and typical sensor characteristics
+    float min_density, max_density;
+    
+    if (max_dim < 100.0f) {        // Very small objects (< 10cm)
+        min_density = 0.00001f;    // Very permissive for small objects
+        max_density = 0.5f;        // Allow dense small objects
+    } else if (max_dim < 300.0f) { // Small objects (10-30cm)
+        min_density = 0.00005f;    // Slightly more restrictive
+        max_density = 0.2f;        
+    } else if (max_dim < 800.0f) { // Medium objects (30-80cm)
+        min_density = 0.0001f;     // Standard restriction
+        max_density = 0.1f;        
+    } else {                       // Large objects (> 80cm)
+        min_density = 0.00005f;    // Large objects can be sparse
+        max_density = 0.05f;       // But not too dense (likely noise if very dense)
+    }
+    
+    if (point_density < min_density) {
+        result.rejection_reason = "Point density too low: " + std::to_string(point_density) + 
+                                 " (min required: " + std::to_string(min_density) + 
+                                 " for size " + std::to_string(max_dim) + "mm)";
+        return result;
+    }
+    
+    if (point_density > max_density) {
+        result.rejection_reason = "Point density too high: " + std::to_string(point_density) + 
+                                 " (max allowed: " + std::to_string(max_density) + 
+                                 " for size " + std::to_string(max_dim) + "mm)";
+        return result;
+    }
+    
+    // ADAPTIVE HEIGHT DISTRIBUTION - more permissive for smaller objects
+    std::vector<float> z_values;
+    z_values.reserve(cloud->size());
+    for (const auto& pt : cloud->points) {
+        z_values.push_back(pt.z);
+    }
+    
+    if (z_values.size() > 4) { // Only check if we have enough points
+        std::sort(z_values.begin(), z_values.end());
+        float height_p25 = z_values[z_values.size() / 4];
+        float height_p75 = z_values[3 * z_values.size() / 4];
+        float height_iqr = height_p75 - height_p25;
+        
+        // Adaptive height distribution check based on object height
+        float min_height_ratio;
+        if (height < 50.0f) {      // Very flat objects (< 5cm height)
+            min_height_ratio = 0.02f; // Very permissive (2%)
+        } else if (height < 150.0f) { // Moderately flat objects (5-15cm)
+            min_height_ratio = 0.05f; // Moderately permissive (5%)
+        } else {                   // Taller objects
+            min_height_ratio = 0.1f;  // Standard restriction (10%)
+        }
+        
+        if (height_iqr < height * min_height_ratio) {
+            result.rejection_reason = "Object too flat (height IQR: " + std::to_string(height_iqr) + 
+                                     "mm, " + std::to_string(100.0f * height_iqr / height) + 
+                                     "% of height, min required: " + std::to_string(100.0f * min_height_ratio) + "%)";
+            return result;
+        }
+    }
+    
+    // ENHANCED CONFIDENCE SCORING with adaptive weights
+    float size_score, aspect_score, density_score;
+    
+    // Size score - favor objects in the sweet spot (10cm - 1m)
+    if (max_dim < 100.0f) {
+        size_score = 0.6f + 0.4f * (max_dim / 100.0f); // 0.6-1.0 for small objects
+    } else if (max_dim < 1000.0f) {
+        size_score = 1.0f; // Perfect score for medium objects
+    } else {
+        size_score = std::max(0.2f, 1.0f - (max_dim - 1000.0f) / 1500.0f); // Decline for large objects
+    }
+    
+    // Aspect score - penalize extreme aspect ratios but be more forgiving
+    float normalized_aspect = (aspect_ratio - 1.0f) / (max_allowed_aspect_ratio - 1.0f);
+    aspect_score = std::max(0.0f, 1.0f - normalized_aspect);
+    
+    // Density score - favor densities in the middle of the allowed range
+    float density_range = max_density - min_density;
+    float normalized_density = (point_density - min_density) / density_range;
+    // Peak score at 30% of the range, then decline
+    if (normalized_density < 0.3f) {
+        density_score = normalized_density / 0.3f;
+    } else {
+        density_score = 1.0f - 0.5f * (normalized_density - 0.3f) / 0.7f;
+    }
+    density_score = std::max(0.1f, std::min(1.0f, density_score));
+    
+    // ADAPTIVE CONFIDENCE THRESHOLD
+    float base_confidence = (size_score + aspect_score + density_score) / 3.0f;
+    
+    // Lower confidence threshold for smaller objects (they're harder to detect perfectly)
+    float confidence_threshold;
+    if (max_dim < 100.0f) {
+        confidence_threshold = 0.25f; // Very permissive for small objects
+    } else if (max_dim < 300.0f) {
+        confidence_threshold = 0.35f; // Moderately permissive
+    } else if (max_dim < 800.0f) {
+        confidence_threshold = 0.45f; // Standard threshold
+    } else {
+        confidence_threshold = 0.55f; // Stricter for large objects
+    }
+    
+    result.confidence_score = base_confidence;
+    result.is_valid_object = result.confidence_score > confidence_threshold;
+    
+    if (!result.is_valid_object) {
+        result.rejection_reason = "Low confidence score: " + std::to_string(result.confidence_score) + 
+                                 " (threshold: " + std::to_string(confidence_threshold) + 
+                                 " for size " + std::to_string(max_dim) + "mm)";
+    }
+    
+    // DEBUG OUTPUT for tuning
+    std::cout << "  Validation details - Size: " << width << "x" << depth << "x" << height 
+              << "mm, Density: " << point_density << " pts/mm³, Aspect: " << aspect_ratio
+              << ", Scores: size=" << size_score << " aspect=" << aspect_score 
+              << " density=" << density_score << " final=" << result.confidence_score 
+              << " (threshold=" << confidence_threshold << ")" << std::endl;
+    
+    return result;
+}
+
+void printValidationStatistics(const std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>& cluster_clouds) {
+    if (cluster_clouds.empty()) return;
+    
+    std::cout << "\n=== Validation Statistics ===" << std::endl;
+    
+    for (size_t i = 0; i < cluster_clouds.size(); ++i) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::copyPointCloud(*cluster_clouds[i], *xyz_cloud);
+        
+        Eigen::Vector4f min_pt, max_pt;
+        pcl::getMinMax3D(*xyz_cloud, min_pt, max_pt);
+        
+        float width = max_pt[0] - min_pt[0];
+        float depth = max_pt[1] - min_pt[1];
+        float height = max_pt[2] - min_pt[2];
+        float volume = width * depth * height;
+        float density = xyz_cloud->size() / volume;
+        float max_dim = std::max({width, depth, height});
+        float min_dim = std::min({width, depth, height});
+        float aspect = max_dim / min_dim;
+        
+        std::cout << "Cluster " << i << ": " << xyz_cloud->size() << " points, "
+                  << width << "x" << depth << "x" << height << "mm, "
+                  << "density=" << density << ", aspect=" << aspect << std::endl;
+    }
+    
+    std::cout << "============================\n" << std::endl;
+}
+
+// Enhanced cluster selection that considers multiple factors
+struct ClusterCandidate {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
+    size_t original_index;
+    float distance_to_origin;
+    float confidence_score;
+    bool is_valid;
+    std::string rejection_reason;
+};
+
+size_t selectBestObjectCluster(const std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>& cluster_clouds,
+                               const OBBData& previous_obb) {
+    
+    // Print detailed statistics first
+    printValidationStatistics(cluster_clouds);
+    
+    std::vector<ClusterCandidate> candidates;
+    candidates.reserve(cluster_clouds.size());
+    
+    // Evaluate all clusters
+    for (size_t i = 0; i < cluster_clouds.size(); ++i) {
+        ClusterCandidate candidate;
+        candidate.cloud = cluster_clouds[i];
+        candidate.original_index = i;
+        
+        // Convert to XYZ for validation
+        pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::copyPointCloud(*cluster_clouds[i], *xyz_cloud);
+        
+        // Validate the cluster
+        ObjectValidationResult validation = validateObjectCluster(xyz_cloud);
+        candidate.is_valid = validation.is_valid_object;
+        candidate.confidence_score = validation.confidence_score;
+        candidate.rejection_reason = validation.rejection_reason;
+        
+        // Calculate 2D distance to origin
+        double x_sum = 0.0, y_sum = 0.0;
+        for (const auto &pt : cluster_clouds[i]->points) {
+            x_sum += pt.x;
+            y_sum += pt.y;
+        }
+        double count = static_cast<double>(cluster_clouds[i]->size());
+        double centroidX = x_sum / count;
+        double centroidY = y_sum / count;
+        candidate.distance_to_origin = std::sqrt(centroidX * centroidX + centroidY * centroidY);
+        
+        candidates.push_back(candidate);
+        
+        std::cout << "Cluster " << i << ": " 
+                  << (candidate.is_valid ? "VALID" : "INVALID") 
+                  << " (score: " << std::fixed << std::setprecision(3) << candidate.confidence_score 
+                  << ", dist: " << std::fixed << std::setprecision(1) << candidate.distance_to_origin << "mm)";
+        if (!candidate.is_valid) {
+            std::cout << " - " << candidate.rejection_reason;
+        }
+        std::cout << std::endl;
+    }
+    
+    // Filter valid candidates
+    std::vector<ClusterCandidate*> valid_candidates;
+    for (auto& candidate : candidates) {
+        if (candidate.is_valid) {
+            valid_candidates.push_back(&candidate);
+        }
+    }
+    
+    if (valid_candidates.empty()) {
+        std::cout << "No valid object clusters found! Consider adjusting validation parameters." << std::endl;
+        
+        // FALLBACK: If no clusters are valid, try to find the "best bad" cluster
+        // This prevents the system from completely failing
+        std::cout << "Attempting fallback selection of least-bad cluster..." << std::endl;
+        
+        ClusterCandidate* best_fallback = nullptr;
+        float best_fallback_score = -1.0f;
+        
+        for (auto& candidate : candidates) {
+            // Skip clusters that are too large (definitely walls/noise)
+            if (candidate.rejection_reason.find("too large") != std::string::npos) {
+                continue;
+            }
+            
+            // Prefer clusters with higher confidence scores even if they failed validation
+            if (candidate.confidence_score > best_fallback_score) {
+                best_fallback_score = candidate.confidence_score;
+                best_fallback = &candidate;
+            }
+        }
+        
+        if (best_fallback) {
+            std::cout << "FALLBACK: Selected cluster " << best_fallback->original_index 
+                      << " with score " << best_fallback->confidence_score 
+                      << " (reason for rejection: " << best_fallback->rejection_reason << ")" << std::endl;
+            return best_fallback->original_index;
+        }
+        
+        return SIZE_MAX; // Still no valid clusters
+    }
+    
+    std::cout << "Found " << valid_candidates.size() << " valid clusters" << std::endl;
+    
+    // If we have a previous OBB, prefer clusters close to the previous position
+    if (previous_obb.valid) {
+        Eigen::Vector3f prev_center(previous_obb.obb_pos.x, previous_obb.obb_pos.y, previous_obb.obb_pos.z);
+        
+        float best_combined_score = -1.0f;
+        ClusterCandidate* best_candidate = nullptr;
+        
+        for (auto* candidate : valid_candidates) {
+            // Calculate distance to previous OBB center
+            double x_sum = 0.0, y_sum = 0.0, z_sum = 0.0;
+            for (const auto &pt : candidate->cloud->points) {
+                x_sum += pt.x;
+                y_sum += pt.y;
+                z_sum += pt.z;
+            }
+            double count = static_cast<double>(candidate->cloud->size());
+            Eigen::Vector3f curr_center(x_sum/count, y_sum/count, z_sum/count);
+            
+            float distance_to_prev = (curr_center - prev_center).norm();
+            
+            // Combined score: prefer high confidence + close to previous position
+            float distance_score = 1.0f / (1.0f + distance_to_prev / 1000.0f); // Normalize by 1m
+            float combined_score = 0.7f * candidate->confidence_score + 0.3f * distance_score;
+            
+            std::cout << "Cluster " << candidate->original_index 
+                      << " combined score: " << std::fixed << std::setprecision(3) << combined_score 
+                      << " (conf: " << candidate->confidence_score 
+                      << ", dist to prev: " << std::fixed << std::setprecision(1) << distance_to_prev << "mm)" << std::endl;
+            
+            if (combined_score > best_combined_score) {
+                best_combined_score = combined_score;
+                best_candidate = candidate;
+            }
+        }
+        
+        if (best_candidate) {
+            std::cout << "Selected cluster " << best_candidate->original_index 
+                      << " based on temporal continuity (score: " << best_combined_score << ")" << std::endl;
+            return best_candidate->original_index;
+        }
+    }
+    
+    // Fallback: select the valid cluster with highest confidence score
+    auto best_it = std::max_element(valid_candidates.begin(), valid_candidates.end(),
+        [](const ClusterCandidate* a, const ClusterCandidate* b) {
+            return a->confidence_score < b->confidence_score;
+        });
+    
+    std::cout << "Selected cluster " << (*best_it)->original_index 
+              << " with highest confidence score: " << std::fixed << std::setprecision(3) 
+              << (*best_it)->confidence_score << std::endl;
+    
+    return (*best_it)->original_index;
+}
+
+bool shouldInvalidateOBB(const OBBData& obb, int max_frames_without_detection) {
+    if (!obb.valid) return false;
+    
+    // If we haven't seen a valid detection for too many frames, invalidate
+    if (obb.frames_since_valid_detection > max_frames_without_detection) {
+        return true;
+    }
+    
+    // Also check time-based timeout (optional - frames are usually more reliable)
+    auto now = std::chrono::steady_clock::now();
+    auto time_since_update = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - obb.last_update_time).count();
+    
+    // If no update for more than 2 seconds, invalidate
+    if (time_since_update > 2000) {
+        return true;
+    }
+    
+    return false;
+}
+
+OBBData updateOBBWithDetection(const OBBData& previous_obb, const OBBData& new_obb, 
+                                float confidence_score) {
+    OBBData updated_obb;
+    
+    if (new_obb.valid) {
+        // We have a new valid detection
+        if (previous_obb.valid) {
+            // Apply temporal smoothing
+            updated_obb = temporallyStableOBB(previous_obb, new_obb);
+        } else {
+            // First detection or previous was invalid
+            updated_obb = new_obb;
+        }
+        
+        // Reset timing information
+        updated_obb.last_update_time = std::chrono::steady_clock::now();
+        updated_obb.frames_since_valid_detection = 0;
+        updated_obb.confidence_at_creation = confidence_score;
+        updated_obb.valid = true;
+        
+        std::cout << "OBB updated with new detection (confidence: " << confidence_score << ")" << std::endl;
+    } else {
+        // No valid detection this frame
+        if (previous_obb.valid) {
+            // Keep previous OBB but increment frame counter
+            updated_obb = previous_obb;
+            updated_obb.frames_since_valid_detection++;
+            
+            // Check if we should invalidate due to timeout
+            if (shouldInvalidateOBB(updated_obb, 5)) { // 5 frames timeout
+                std::cout << "OBB invalidated due to timeout (" 
+                          << updated_obb.frames_since_valid_detection 
+                          << " frames without detection)" << std::endl;
+                updated_obb.valid = false;
+                updated_obb.frames_since_valid_detection = 0;
+            } else {
+                std::cout << "Keeping previous OBB (" 
+                          << updated_obb.frames_since_valid_detection 
+                          << " frames without detection)" << std::endl;
+            }
+        } else {
+            // No previous OBB and no new detection
+            updated_obb.valid = false;
+            updated_obb.frames_since_valid_detection = 0;
+        }
+    }
+    
+    return updated_obb;
+}
+
+OBBData computeValidatedOBBWithConfidence(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, 
+                                         const pcl::ModelCoefficients& ground_coefficients,
+                                         const OBBData& previous_obb,
+                                         float confidence_score) {
+    OBBData invalid_obb;
+    invalid_obb.valid = false;
+    
+    if (!cloud || cloud->empty()) {
+        std::cout << "Cannot compute OBB: empty cloud" << std::endl;
+        return invalid_obb;
+    }
+    
+    // Validate the cluster first
+    ObjectValidationResult validation = validateObjectCluster(cloud);
+    if (!validation.is_valid_object) {
+        std::cout << "Rejecting OBB computation: " << validation.rejection_reason << std::endl;
+        return invalid_obb;
+    }
+    
+    std::cout << "Computing OBB for valid object (confidence: " 
+              << validation.confidence_score << ")" << std::endl;
+    
+    // Compute the minimal OBB
+    OBBData obb = findMinimumOBB(cloud);
+    if (!obb.valid) {
+        std::cout << "Failed to compute minimal OBB" << std::endl;
+        return invalid_obb;
+    }
+    
+    // Extend to ground
+    obb = extendOBBToGround(obb, ground_coefficients);
+    
+    // Set timing and confidence information
+    obb.last_update_time = std::chrono::steady_clock::now();
+    obb.frames_since_valid_detection = 0;
+    obb.confidence_at_creation = confidence_score;
+    
+    return obb;
+}
+
+OBBData computeValidatedOBB(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, 
+                            const pcl::ModelCoefficients& ground_coefficients,
+                            const OBBData& previous_obb) {
+    return computeValidatedOBBWithConfidence(cloud, ground_coefficients, previous_obb, 0.0f);
+}
+
+OBBData getInvalidOBB() {
+    OBBData invalid_obb;
+    invalid_obb.valid = false;
+    invalid_obb.frames_since_valid_detection = 0;
+    invalid_obb.confidence_at_creation = 0.0f;
+    return invalid_obb;
+}
 
 OBBData findMinimumOBB(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
     try {    
@@ -297,7 +796,7 @@ OBBData extendOBBToGround(const OBBData& obb,
     std::vector<Eigen::Vector3f> vertices = calculateOBBVertices(obb);
     std::vector<Eigen::Vector3f> bottom_vertices;
     for (int i = 4; i < 8; i++) {
-    bottom_vertices.push_back(vertices[i]);
+        bottom_vertices.push_back(vertices[i]);
     }
 
     // Extend each bottom vertex by 2cm in X and Y directions only
@@ -306,36 +805,36 @@ OBBData extendOBBToGround(const OBBData& obb,
 
     // For each bottom vertex
     for (const auto& corner : bottom_vertices) {
-    // Create extended points in 4 diagonal directions
-    extended_corners.push_back(corner + Eigen::Vector3f(extension, extension, 0));
-    extended_corners.push_back(corner + Eigen::Vector3f(-extension, extension, 0));
-    extended_corners.push_back(corner + Eigen::Vector3f(extension, -extension, 0));
-    extended_corners.push_back(corner + Eigen::Vector3f(-extension, -extension, 0));
+        // Create extended points in 4 diagonal directions
+        extended_corners.push_back(corner + Eigen::Vector3f(extension, extension, 0));
+        extended_corners.push_back(corner + Eigen::Vector3f(-extension, extension, 0));
+        extended_corners.push_back(corner + Eigen::Vector3f(extension, -extension, 0));
+        extended_corners.push_back(corner + Eigen::Vector3f(-extension, -extension, 0));
     }
 
     // Calculate the Z value on the ground plane for each extended point
     float min_ground_z = std::numeric_limits<float>::max();
 
     for (const auto& point : extended_corners) {
-    // For a point (x,y,?), solve for z in the plane equation ax + by + cz + d = 0
-    // => z = -(ax + by + d) / c
-    if (std::abs(c) > 1e-6) { // Make sure we don't divide by zero
-    float ground_z = -(a * point.x() + b * point.y() + d) / c;
-    min_ground_z = std::min(min_ground_z, ground_z);
-    }
+        // For a point (x,y,?), solve for z in the plane equation ax + by + cz + d = 0
+        // => z = -(ax + by + d) / c
+        if (std::abs(c) > 1e-6) { // Make sure we don't divide by zero
+            float ground_z = -(a * point.x() + b * point.y() + d) / c;
+            min_ground_z = std::min(min_ground_z, ground_z);
+        }
     }
 
     // Find current lowest point of the OBB
     float current_lowest_z = std::numeric_limits<float>::max();
     for (const auto& vertex : bottom_vertices) {
-    current_lowest_z = std::min(current_lowest_z, vertex.z());
+        current_lowest_z = std::min(current_lowest_z, vertex.z());
     }
 
     // Check if extension is needed
     const float ground_threshold = 5.0f; // 5mm tolerance
     if (std::abs(current_lowest_z - min_ground_z) <= ground_threshold) {
-    std::cout << "Object already at ground level (within tolerance)" << std::endl;
-    return obb;
+        std::cout << "Object already at ground level (within tolerance)" << std::endl;
+        return obb;
     }
 
     // Calculate extension needed
@@ -343,26 +842,26 @@ OBBData extendOBBToGround(const OBBData& obb,
 
     // Only extend if ground is below the object
     if (height_extension > 0) {
-    std::cout << "Current lowest z: " << current_lowest_z << ", Ground z: " << min_ground_z << std::endl;
+        std::cout << "Current lowest z: " << current_lowest_z << ", Ground z: " << min_ground_z << std::endl;
 
-    // Extend the OBB downward in its local coordinate system
-    float current_height = obb.obb_max.z - obb.obb_min.z;
+        // Extend the OBB downward in its local coordinate system
+        float current_height = obb.obb_max.z - obb.obb_min.z;
 
-    // Adjust the min Z coordinate (extend downward)
-    extended_obb.obb_min.z -= height_extension;
+        // Adjust the min Z coordinate (extend downward)
+        extended_obb.obb_min.z -= height_extension;
 
-    // Adjust the center position (move down by half the extension)
-    Eigen::Vector3f z_axis = obb.rot_matrix.col(2);
-    Eigen::Vector3f center_adjustment = z_axis * (-height_extension / 2.0f);
-    extended_obb.obb_pos.x += center_adjustment.x();
-    extended_obb.obb_pos.y += center_adjustment.y();
-    extended_obb.obb_pos.z += center_adjustment.z();
+        // Adjust the center position (move down by half the extension)
+        Eigen::Vector3f z_axis = obb.rot_matrix.col(2);
+        Eigen::Vector3f center_adjustment = z_axis * (-height_extension / 2.0f);
+        extended_obb.obb_pos.x += center_adjustment.x();
+        extended_obb.obb_pos.y += center_adjustment.y();
+        extended_obb.obb_pos.z += center_adjustment.z();
 
-    float new_height = current_height + height_extension;
-    std::cout << "Extended OBB height by " << height_extension << "mm" << std::endl;
-    std::cout << "New OBB height: " << new_height << "mm" << std::endl;
+        float new_height = current_height + height_extension;
+        std::cout << "Extended OBB height by " << height_extension << "mm" << std::endl;
+        std::cout << "New OBB height: " << new_height << "mm" << std::endl;
     } else {
-    std::cout << "Ground is above object bottom, no extension needed" << std::endl;
+        std::cout << "Ground is above object bottom, no extension needed" << std::endl;
     }
 
     return extended_obb;
