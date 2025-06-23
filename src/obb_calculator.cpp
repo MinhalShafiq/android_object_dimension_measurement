@@ -119,7 +119,7 @@ ObjectValidationResult validateObjectCluster(const pcl::PointCloud<pcl::PointXYZ
         return result;
     }
     
-    // ============= POINT DENSITY ANALYSIS =============
+    // POINT DENSITY ANALYSIS 
     float volume = width * depth * height;
     float point_density = cloud->size() / volume; // points per cubic mm
     
@@ -141,7 +141,7 @@ ObjectValidationResult validateObjectCluster(const pcl::PointCloud<pcl::PointXYZ
         return result;
     }
     
-    // ============= GEOMETRIC DISTRIBUTION ANALYSIS =============
+    // GEOMETRIC DISTRIBUTION ANALYSIS 
     // Check if points are distributed in a wall-like pattern
     std::vector<float> x_coords, y_coords, z_coords;
     for (const auto& pt : cloud->points) {
@@ -186,7 +186,7 @@ ObjectValidationResult validateObjectCluster(const pcl::PointCloud<pcl::PointXYZ
         }
     }
     
-    // ============= ENHANCED CONFIDENCE SCORING =============
+    // ENHANCED CONFIDENCE SCORING
     float size_score, aspect_score, density_score, distance_score, shape_score;
     
     // Size score - favor medium-sized objects
@@ -295,7 +295,7 @@ void printValidationStatistics(const std::vector<pcl::PointCloud<pcl::PointXYZRG
                   << "density=" << density << ", aspect=" << aspect << std::endl;
     }
     
-    std::cout << "============================\n" << std::endl;
+    std::cout << "---------------------\n" << std::endl;
 }
 
 // Enhanced cluster selection that considers multiple factors
