@@ -114,6 +114,8 @@ dpkg -l | grep libboost
 ```bash
 # Clone or navigate to your project directory
 cd /path/to/your/project
+git clone https://github.com/MinhalShafiq/android_object_dimension_measurement.git
+cd android_object_dimension_measurement
 
 # Install dependencies automatically
 make install-deps
