@@ -29,167 +29,241 @@ ObjectValidationResult validateObjectCluster(const pcl::PointCloud<pcl::PointXYZ
     float depth = max_pt[1] - min_pt[1];
     float height = max_pt[2] - min_pt[2];
     
-    // ADAPTIVE SIZE CONSTRAINTS - much more permissive
-    const float MAX_DIMENSION = 2500.0f; // Keep 2.5m as absolute maximum
-    const float MIN_DIMENSION = 50.0f;   // Reduced to 2cm minimum (was 5cm)
+    // Compute centroid and distance from camera origin
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*cloud, centroid);
+    float distance_from_origin = std::sqrt(centroid[0]*centroid[0] + centroid[1]*centroid[1] + centroid[2]*centroid[2]);
     
-    if (width > MAX_DIMENSION || depth > MAX_DIMENSION || height > MAX_DIMENSION) {
-        result.rejection_reason = "Object too large: " + std::to_string(std::max({width, depth, height})) + "mm";
+    // ENHANCED SIZE CONSTRAINTS
+    const float MAX_REASONABLE_OBJECT = 2500.0f; // Reduced from 2500mm to 1.2m
+    const float MIN_REASONABLE_OBJECT = 40.0f;    // Objects smaller than 3cm are likely noise
+    
+    // Reject very large objects (likely walls/furniture)
+    if (width > MAX_REASONABLE_OBJECT || depth > MAX_REASONABLE_OBJECT || height > MAX_REASONABLE_OBJECT) {
+        result.rejection_reason = "Object too large (likely wall/furniture): " + 
+                                 std::to_string(std::max({width, depth, height})) + "mm";
         return result;
     }
     
-    if (width < MIN_DIMENSION && depth < MIN_DIMENSION && height < MIN_DIMENSION) {
-        result.rejection_reason = "Object too small (all dimensions < " + std::to_string(MIN_DIMENSION) + "mm)";
-        return result;
-    }
-    
-    // ADAPTIVE ASPECT RATIO - more permissive based on object size
+    // Reject very small objects (likely noise)
     float max_dim = std::max({width, depth, height});
+    if (max_dim < MIN_REASONABLE_OBJECT) {
+        result.rejection_reason = "Object too small (likely noise): " + std::to_string(max_dim) + "mm";
+        return result;
+    }
+    
+    // WALL DETECTION
+    // Walls are characterized by being very flat and elongated
     float min_dim = std::min({width, depth, height});
-    float aspect_ratio = max_dim / min_dim;
+    float mid_dim = width + depth + height - max_dim - min_dim; // The middle dimension
     
-    // Allow higher aspect ratios for smaller objects (could be thin objects)
-    // Allow lower aspect ratios for larger objects (likely walls if too elongated)
-    float max_allowed_aspect_ratio;
-    if (max_dim < 200.0f) {        // Objects smaller than 20cm
-        max_allowed_aspect_ratio = 50.0f;  // Very permissive
-    } else if (max_dim < 500.0f) { // Objects 20-50cm
-        max_allowed_aspect_ratio = 25.0f;  // Moderately permissive
-    } else if (max_dim < 1000.0f) { // Objects 50cm-1m
-        max_allowed_aspect_ratio = 15.0f;  // Standard restriction
-    } else {                       // Objects larger than 1m
-        max_allowed_aspect_ratio = 8.0f;   // Strict (likely walls if too elongated)
-    }
-    
-    if (aspect_ratio > max_allowed_aspect_ratio) {
-        result.rejection_reason = "Invalid aspect ratio: " + std::to_string(aspect_ratio) + 
-                                 " (max allowed: " + std::to_string(max_allowed_aspect_ratio) + 
-                                 " for size " + std::to_string(max_dim) + "mm)";
-        return result;
-    }
-    
-    // ADAPTIVE POINT DENSITY - much more realistic thresholds
-    float volume = width * depth * height;
-    float point_density = cloud->size() / volume; // points per cubic mm
-    
-    // Calculate adaptive density thresholds based on object size and typical sensor characteristics
-    float min_density, max_density;
-    
-    if (max_dim < 100.0f) {        // Very small objects (< 10cm)
-        min_density = 0.00001f;    // Very permissive for small objects
-        max_density = 0.5f;        // Allow dense small objects
-    } else if (max_dim < 300.0f) { // Small objects (10-30cm)
-        min_density = 0.00005f;    // Slightly more restrictive
-        max_density = 0.2f;        
-    } else if (max_dim < 800.0f) { // Medium objects (30-80cm)
-        min_density = 0.0001f;     // Standard restriction
-        max_density = 0.1f;        
-    } else {                       // Large objects (> 80cm)
-        min_density = 0.00005f;    // Large objects can be sparse
-        max_density = 0.05f;       // But not too dense (likely noise if very dense)
-    }
-    
-    if (point_density < min_density) {
-        result.rejection_reason = "Point density too low: " + std::to_string(point_density) + 
-                                 " (min required: " + std::to_string(min_density) + 
-                                 " for size " + std::to_string(max_dim) + "mm)";
-        return result;
-    }
-    
-    if (point_density > max_density) {
-        result.rejection_reason = "Point density too high: " + std::to_string(point_density) + 
-                                 " (max allowed: " + std::to_string(max_density) + 
-                                 " for size " + std::to_string(max_dim) + "mm)";
-        return result;
-    }
-    
-    // ADAPTIVE HEIGHT DISTRIBUTION - more permissive for smaller objects
-    std::vector<float> z_values;
-    z_values.reserve(cloud->size());
-    for (const auto& pt : cloud->points) {
-        z_values.push_back(pt.z);
-    }
-    
-    if (z_values.size() > 4) { // Only check if we have enough points
-        std::sort(z_values.begin(), z_values.end());
-        float height_p25 = z_values[z_values.size() / 4];
-        float height_p75 = z_values[3 * z_values.size() / 4];
-        float height_iqr = height_p75 - height_p25;
-        
-        // Adaptive height distribution check based on object height
-        float min_height_ratio;
-        if (height < 50.0f) {      // Very flat objects (< 5cm height)
-            min_height_ratio = 0.02f; // Very permissive (2%)
-        } else if (height < 150.0f) { // Moderately flat objects (5-15cm)
-            min_height_ratio = 0.05f; // Moderately permissive (5%)
-        } else {                   // Taller objects
-            min_height_ratio = 0.1f;  // Standard restriction (10%)
-        }
-        
-        if (height_iqr < height * min_height_ratio) {
-            result.rejection_reason = "Object too flat (height IQR: " + std::to_string(height_iqr) + 
-                                     "mm, " + std::to_string(100.0f * height_iqr / height) + 
-                                     "% of height, min required: " + std::to_string(100.0f * min_height_ratio) + "%)";
+    // Check for wall-like proportions (very flat objects)
+    const float WALL_FLATNESS_THRESHOLD = 80.0f; // Objects flatter than 8cm are likely walls
+    if (min_dim < WALL_FLATNESS_THRESHOLD) {
+        // Check if it's also elongated 
+        float elongation_ratio = max_dim / mid_dim;
+        if (elongation_ratio > 3.0f && max_dim > 600.0f) { // Long and flat = wall
+            result.rejection_reason = "Wall-like geometry detected (flat and elongated): " + 
+                                     std::to_string(width) + "x" + std::to_string(depth) + "x" + 
+                                     std::to_string(height) + "mm";
             return result;
         }
     }
     
-    // ENHANCED CONFIDENCE SCORING with adaptive weights
-    float size_score, aspect_score, density_score;
-    
-    // Size score - favor objects in the sweet spot (10cm - 1m)
-    if (max_dim < 100.0f) {
-        size_score = 0.6f + 0.4f * (max_dim / 100.0f); // 0.6-1.0 for small objects
-    } else if (max_dim < 1000.0f) {
-        size_score = 1.0f; // Perfect score for medium objects
-    } else {
-        size_score = std::max(0.2f, 1.0f - (max_dim - 1000.0f) / 1500.0f); // Decline for large objects
+    // DISTANCE-BASED FILTERING
+    // Objects very far away are likely walls or background
+    const float MAX_DETECTION_DISTANCE = 3000.0f; // 3 meters max
+    if (distance_from_origin > MAX_DETECTION_DISTANCE) {
+        result.rejection_reason = "Object too far away (likely background): " + 
+                                 std::to_string(distance_from_origin) + "mm";
+        return result;
     }
     
-    // Aspect score - penalize extreme aspect ratios but be more forgiving
-    float normalized_aspect = (aspect_ratio - 1.0f) / (max_allowed_aspect_ratio - 1.0f);
-    aspect_score = std::max(0.0f, 1.0f - normalized_aspect);
+    // Very large objects close to camera are suspicious (likely walls)
+    if (distance_from_origin < 1000.0f && max_dim > 800.0f) {
+        result.rejection_reason = "Large object too close to camera (likely wall): " +
+                                 std::to_string(max_dim) + "mm at " + std::to_string(distance_from_origin) + "mm";
+        return result;
+    }
     
-    // Density score - favor densities in the middle of the allowed range
-    float density_range = max_density - min_density;
-    float normalized_density = (point_density - min_density) / density_range;
-    // Peak score at 30% of the range, then decline
-    if (normalized_density < 0.3f) {
-        density_score = normalized_density / 0.3f;
+    // IMPROVED ASPECT RATIO ANALYSIS
+    float primary_aspect = max_dim / min_dim;
+    float secondary_aspect = max_dim / mid_dim;
+    
+    // More sophisticated aspect ratio checking
+    float max_allowed_primary_aspect;
+    float max_allowed_secondary_aspect;
+    
+    if (max_dim < 200.0f) {        // Small objects (< 20cm)
+        max_allowed_primary_aspect = 15.0f;   // Small objects can be elongated
+        max_allowed_secondary_aspect = 8.0f;
+    } else if (max_dim < 500.0f) { // Medium objects (20-50cm)
+        max_allowed_primary_aspect = 10.0f;   // Moderate restriction
+        max_allowed_secondary_aspect = 6.0f;
+    } else {                       // Large objects (> 50cm)
+        max_allowed_primary_aspect = 6.0f;    // Strict for large objects
+        max_allowed_secondary_aspect = 4.0f;
+    }
+    
+    if (primary_aspect > max_allowed_primary_aspect) {
+        result.rejection_reason = "Extreme aspect ratio (likely wall/pole): " + 
+                                 std::to_string(primary_aspect) + " (max: " + 
+                                 std::to_string(max_allowed_primary_aspect) + ")";
+        return result;
+    }
+    
+    if (secondary_aspect > max_allowed_secondary_aspect) {
+        result.rejection_reason = "Secondary aspect ratio too high: " + 
+                                 std::to_string(secondary_aspect) + " (max: " + 
+                                 std::to_string(max_allowed_secondary_aspect) + ")";
+        return result;
+    }
+    
+    // ============= POINT DENSITY ANALYSIS =============
+    float volume = width * depth * height;
+    float point_density = cloud->size() / volume; // points per cubic mm
+    
+    // Calculate expected density based on distance (farther = lower density)
+    float distance_factor = std::max(0.1f, std::min(1.0f, 1000.0f / distance_from_origin));
+    float expected_min_density = 0.00008f * distance_factor; // Adaptive based on distance
+    float expected_max_density = 0.05f / distance_factor;    // Closer objects can be denser
+    
+    if (point_density < expected_min_density) {
+        result.rejection_reason = "Point density too low for distance: " + 
+                                 std::to_string(point_density) + " at " + 
+                                 std::to_string(distance_from_origin) + "mm";
+        return result;
+    }
+    
+    if (point_density > expected_max_density) {
+        result.rejection_reason = "Point density too high (likely noise cluster): " + 
+                                 std::to_string(point_density);
+        return result;
+    }
+    
+    // ============= GEOMETRIC DISTRIBUTION ANALYSIS =============
+    // Check if points are distributed in a wall-like pattern
+    std::vector<float> x_coords, y_coords, z_coords;
+    for (const auto& pt : cloud->points) {
+        x_coords.push_back(pt.x);
+        y_coords.push_back(pt.y);
+        z_coords.push_back(pt.z);
+    }
+    
+    // Calculate variance in each dimension
+    auto calc_variance = [](const std::vector<float>& values) {
+        float mean = std::accumulate(values.begin(), values.end(), 0.0f) / values.size();
+        float variance = 0.0f;
+        for (float v : values) {
+            variance += (v - mean) * (v - mean);
+        }
+        return variance / values.size();
+    };
+    
+    float var_x = calc_variance(x_coords);
+    float var_y = calc_variance(y_coords);
+    float var_z = calc_variance(z_coords);
+    
+    // Find which dimension has the least variance (most constrained)
+    float min_variance = std::min({var_x, var_y, var_z});
+    float max_variance = std::max({var_x, var_y, var_z});
+    
+    // If one dimension is very constrained compared to others, it might be a wall
+    if (max_variance > 0 && min_variance / max_variance < 0.05f) {
+        // Additional check: is the constrained dimension also the smallest spatial dimension?
+        bool is_wall_like = false;
+        if (var_z == min_variance && height == min_dim && height < 100.0f) {
+            is_wall_like = true; // Horizontal wall/floor
+        } else if ((var_x == min_variance && width == min_dim && width < 100.0f) ||
+                   (var_y == min_variance && depth == min_dim && depth < 100.0f)) {
+            is_wall_like = true; // Vertical wall
+        }
+        
+        if (is_wall_like && max_dim > 400.0f) {
+            result.rejection_reason = "Wall-like point distribution detected (variance ratio: " + 
+                                     std::to_string(min_variance / max_variance) + ")";
+            return result;
+        }
+    }
+    
+    // ============= ENHANCED CONFIDENCE SCORING =============
+    float size_score, aspect_score, density_score, distance_score, shape_score;
+    
+    // Size score - favor medium-sized objects
+    if (max_dim >= 80.0f && max_dim <= 600.0f) {
+        size_score = 1.0f; // Sweet spot
+    } else if (max_dim < 80.0f) {
+        size_score = 0.4f + 0.6f * (max_dim / 80.0f); // 0.4-1.0 for small objects
     } else {
-        density_score = 1.0f - 0.5f * (normalized_density - 0.3f) / 0.7f;
+        size_score = std::max(0.1f, 1.0f - (max_dim - 600.0f) / 600.0f); // Decline for large
+    }
+    
+    // Aspect score - penalize extreme ratios more heavily
+    float normalized_primary = (primary_aspect - 1.0f) / (max_allowed_primary_aspect - 1.0f);
+    float normalized_secondary = (secondary_aspect - 1.0f) / (max_allowed_secondary_aspect - 1.0f);
+    aspect_score = std::max(0.0f, 1.0f - std::max(normalized_primary, normalized_secondary));
+    
+    // Density score - favor appropriate densities
+    float density_range = expected_max_density - expected_min_density;
+    float normalized_density = (point_density - expected_min_density) / density_range;
+    if (normalized_density < 0.5f) {
+        density_score = normalized_density / 0.5f;
+    } else {
+        density_score = 1.0f - 0.3f * (normalized_density - 0.5f) / 0.5f;
     }
     density_score = std::max(0.1f, std::min(1.0f, density_score));
     
-    // ADAPTIVE CONFIDENCE THRESHOLD
-    float base_confidence = (size_score + aspect_score + density_score) / 3.0f;
-    
-    // Lower confidence threshold for smaller objects (they're harder to detect perfectly)
-    float confidence_threshold;
-    if (max_dim < 100.0f) {
-        confidence_threshold = 0.25f; // Very permissive for small objects
-    } else if (max_dim < 300.0f) {
-        confidence_threshold = 0.35f; // Moderately permissive
-    } else if (max_dim < 800.0f) {
-        confidence_threshold = 0.45f; // Standard threshold
+    // Distance score - prefer objects at reasonable distances
+    if (distance_from_origin < 500.0f) {
+        distance_score = 0.3f; // Too close might be noise
+    } else if (distance_from_origin < 2000.0f) {
+        distance_score = 1.0f; // Sweet spot
     } else {
-        confidence_threshold = 0.55f; // Stricter for large objects
+        distance_score = std::max(0.1f, 1.0f - (distance_from_origin - 2000.0f) / 1000.0f);
     }
     
-    result.confidence_score = base_confidence;
+    // Shape score - penalize wall-like shapes
+    float flatness_ratio = min_dim / max_dim;
+    if (flatness_ratio > 0.3f) {
+        shape_score = 1.0f; // Good 3D shape
+    } else if (flatness_ratio > 0.1f) {
+        shape_score = 0.5f + 0.5f * (flatness_ratio - 0.1f) / 0.2f; // Moderate penalty
+    } else {
+        shape_score = 0.1f; // Very flat, likely wall
+    }
+    
+    // Combined score with emphasis on shape and distance
+    result.confidence_score = (0.2f * size_score + 
+                              0.2f * aspect_score + 
+                              0.15f * density_score + 
+                              0.25f * distance_score + 
+                              0.2f * shape_score);
+    
+    // Adaptive confidence threshold based on size
+    float confidence_threshold;
+    if (max_dim < 100.0f) {
+        confidence_threshold = 0.35f; // Smaller objects can have lower confidence
+    } else if (max_dim < 400.0f) {
+        confidence_threshold = 0.5f;  // Standard threshold
+    } else {
+        confidence_threshold = 0.65f; // Large objects need high confidence
+    }
+    
     result.is_valid_object = result.confidence_score > confidence_threshold;
     
     if (!result.is_valid_object) {
         result.rejection_reason = "Low confidence score: " + std::to_string(result.confidence_score) + 
-                                 " (threshold: " + std::to_string(confidence_threshold) + 
-                                 " for size " + std::to_string(max_dim) + "mm)";
+                                 " (threshold: " + std::to_string(confidence_threshold) + ")";
     }
     
-    // DEBUG OUTPUT for tuning
-    std::cout << "  Validation details - Size: " << width << "x" << depth << "x" << height 
-              << "mm, Density: " << point_density << " pts/mm³, Aspect: " << aspect_ratio
+    // Debug output
+    std::cout << "  Enhanced validation - Size: " << width << "x" << depth << "x" << height 
+              << "mm, Distance: " << distance_from_origin << "mm"
+              << ", Density: " << point_density << " pts/mm³"
+              << ", Primary aspect: " << primary_aspect << ", Secondary: " << secondary_aspect
               << ", Scores: size=" << size_score << " aspect=" << aspect_score 
-              << " density=" << density_score << " final=" << result.confidence_score 
+              << " density=" << density_score << " distance=" << distance_score
+              << " shape=" << shape_score << " final=" << result.confidence_score 
               << " (threshold=" << confidence_threshold << ")" << std::endl;
     
     return result;

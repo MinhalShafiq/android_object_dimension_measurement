@@ -176,7 +176,7 @@ void processClient(int client_fd, SharedData& shared) {
                         tree->setInputCloud(objects_above);
 
                         DBSCANKdtreeCluster<pcl::PointXYZ> ec;
-                        ec.setCorePointMinPts(10);
+                        ec.setCorePointMinPts(15);
                         ec.setClusterTolerance(cluster_tolerance);
                         ec.setMinClusterSize(min_cluster_size);
                         ec.setMaxClusterSize(max_cluster_size);
