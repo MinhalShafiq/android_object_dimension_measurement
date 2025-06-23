@@ -31,7 +31,7 @@ ObjectValidationResult validateObjectCluster(const pcl::PointCloud<pcl::PointXYZ
     
     // ADAPTIVE SIZE CONSTRAINTS - much more permissive
     const float MAX_DIMENSION = 2500.0f; // Keep 2.5m as absolute maximum
-    const float MIN_DIMENSION = 20.0f;   // Reduced to 2cm minimum (was 5cm)
+    const float MIN_DIMENSION = 50.0f;   // Reduced to 2cm minimum (was 5cm)
     
     if (width > MAX_DIMENSION || depth > MAX_DIMENSION || height > MAX_DIMENSION) {
         result.rejection_reason = "Object too large: " + std::to_string(std::max({width, depth, height})) + "mm";
