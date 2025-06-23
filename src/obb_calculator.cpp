@@ -929,7 +929,7 @@ OBBData extendOBBToGround(const OBBData& obb,
     }
 
     // Check if extension is needed
-    const float ground_threshold = 7.5f; // 5mm tolerance
+    const float ground_threshold = 15.0f; // 5mm tolerance
     if (std::abs(current_lowest_z - min_ground_z) <= ground_threshold) {
         std::cout << "Object already at ground level (within tolerance)" << std::endl;
         return obb;
