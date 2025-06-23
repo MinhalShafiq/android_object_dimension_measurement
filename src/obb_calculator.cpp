@@ -792,24 +792,48 @@ OBBData extendOBBToGround(const OBBData& obb,
     float norm = std::sqrt(a*a + b*b + c*c);
     a /= norm; b /= norm; c /= norm; d /= norm;
 
+    // Calculate OBB vertices manually (since calculateOBBVertices might not be available)
+    std::vector<Eigen::Vector3f> vertices(8);
+    const float hx = (obb.obb_max.x - obb.obb_min.x) * 0.5f;
+    const float hy = (obb.obb_max.y - obb.obb_min.y) * 0.5f;
+    const float hz = (obb.obb_max.z - obb.obb_min.z) * 0.5f;
+    Eigen::Vector3f center(obb.obb_pos.x, obb.obb_pos.y, obb.obb_pos.z);
+
+    // Top vertices (indices 0-3)
+    vertices[0] = center + obb.rot_matrix * Eigen::Vector3f(-hx, -hy, +hz);
+    vertices[1] = center + obb.rot_matrix * Eigen::Vector3f(+hx, -hy, +hz);
+    vertices[2] = center + obb.rot_matrix * Eigen::Vector3f(+hx, +hy, +hz);
+    vertices[3] = center + obb.rot_matrix * Eigen::Vector3f(-hx, +hy, +hz);
+    
+    // Bottom vertices (indices 4-7)
+    vertices[4] = center + obb.rot_matrix * Eigen::Vector3f(-hx, -hy, -hz);
+    vertices[5] = center + obb.rot_matrix * Eigen::Vector3f(+hx, -hy, -hz);
+    vertices[6] = center + obb.rot_matrix * Eigen::Vector3f(+hx, +hy, -hz);
+    vertices[7] = center + obb.rot_matrix * Eigen::Vector3f(-hx, +hy, -hz);
+
     // Get the 4 bottom vertices of the current OBB
-    std::vector<Eigen::Vector3f> vertices = calculateOBBVertices(obb);
     std::vector<Eigen::Vector3f> bottom_vertices;
     for (int i = 4; i < 8; i++) {
         bottom_vertices.push_back(vertices[i]);
     }
 
-    // Extend each bottom vertex by 2cm in X and Y directions only
+    // Extend each bottom vertex by 10cm in X and Y directions only
     std::vector<Eigen::Vector3f> extended_corners;
-    const float extension = 100.0f; // 2cm
+    const float extension = 100.0f; // 10cm extension
 
-    // For each bottom vertex
+    // For each bottom vertex, create extended points in the OBB's local X and Y directions
+    Eigen::Vector3f x_axis = obb.rot_matrix.col(0); // Local X axis
+    Eigen::Vector3f y_axis = obb.rot_matrix.col(1); // Local Y axis
+
     for (const auto& corner : bottom_vertices) {
-        // Create extended points in 4 diagonal directions
-        extended_corners.push_back(corner + Eigen::Vector3f(extension, extension, 0));
-        extended_corners.push_back(corner + Eigen::Vector3f(-extension, extension, 0));
-        extended_corners.push_back(corner + Eigen::Vector3f(extension, -extension, 0));
-        extended_corners.push_back(corner + Eigen::Vector3f(-extension, -extension, 0));
+        // Create extended points in 4 diagonal directions using OBB's local axes
+        extended_corners.push_back(corner + extension * x_axis + extension * y_axis);
+        extended_corners.push_back(corner - extension * x_axis + extension * y_axis);
+        extended_corners.push_back(corner + extension * x_axis - extension * y_axis);
+        extended_corners.push_back(corner - extension * x_axis - extension * y_axis);
+        
+        // Also include the original corner
+        extended_corners.push_back(corner);
     }
 
     // Calculate the Z value on the ground plane for each extended point
@@ -831,7 +855,7 @@ OBBData extendOBBToGround(const OBBData& obb,
     }
 
     // Check if extension is needed
-    const float ground_threshold = 5.0f; // 5mm tolerance
+    const float ground_threshold = 7.5f; // 5mm tolerance
     if (std::abs(current_lowest_z - min_ground_z) <= ground_threshold) {
         std::cout << "Object already at ground level (within tolerance)" << std::endl;
         return obb;
@@ -845,8 +869,6 @@ OBBData extendOBBToGround(const OBBData& obb,
         std::cout << "Current lowest z: " << current_lowest_z << ", Ground z: " << min_ground_z << std::endl;
 
         // Extend the OBB downward in its local coordinate system
-        float current_height = obb.obb_max.z - obb.obb_min.z;
-
         // Adjust the min Z coordinate (extend downward)
         extended_obb.obb_min.z -= height_extension;
 
@@ -857,9 +879,8 @@ OBBData extendOBBToGround(const OBBData& obb,
         extended_obb.obb_pos.y += center_adjustment.y();
         extended_obb.obb_pos.z += center_adjustment.z();
 
-        float new_height = current_height + height_extension;
         std::cout << "Extended OBB height by " << height_extension << "mm" << std::endl;
-        std::cout << "New OBB height: " << new_height << "mm" << std::endl;
+        std::cout << "New OBB height: " << (extended_obb.obb_max.z - extended_obb.obb_min.z) << "mm" << std::endl;
     } else {
         std::cout << "Ground is above object bottom, no extension needed" << std::endl;
     }

@@ -71,3 +71,27 @@ OBBData getInvalidOBB();
 
 // Statistics and debugging functions
 void printValidationStatistics(const std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>& cluster_clouds);
+
+// Helper functions for optimized minimum OBB calculation
+float computeOBBAreaAtAngle(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const Eigen::Vector3f& centroid,
+    const Eigen::Vector3f& verticalAxis,
+    float angle
+);
+
+Eigen::Matrix3f computeBasisAtAngle(
+    const Eigen::Vector3f& verticalAxis,
+    float angle
+);
+
+// Enhanced validation and stability functions
+OBBData validateAndOptimizeOBB(
+    const OBBData& obb,
+    float confidence_threshold = 0.7f
+);
+
+OBBData applyJitterReduction(
+    const std::vector<OBBData>& recent_obbs,
+    int window_size = 5
+);
